@@ -11,9 +11,11 @@ Island, Cyclone Akvan, the French cost-of-living protests, Nvidia's
 Usage: python3 main.py
   Copies entry.png (next to this file) to $MAKEFUN_OUTPUT_DIR/entry.png
   (default /output/entry.png), then verifies the copy: it must start with
-  the PNG magic bytes, be exactly 1024x1024 pixels, and its size and
-  SHA-256 must match the source. Exits non-zero with a message on stderr
-  if verification fails.
+  the PNG magic bytes, be exactly 1024x1024 pixels, its IHDR color type
+  must be 2 (RGB) or 6 (RGBA) with bit depth 8, it must end with a valid
+  IEND chunk (12-byte trailer: length 0, type IEND, CRC 0xAE426082), and
+  its size and SHA-256 must match the source. Exits non-zero with a
+  message on stderr if verification fails.
 """
 import hashlib
 import os
@@ -33,6 +35,11 @@ SRC = HERE / "entry.png"
 DST = OUT / "entry.png"
 
 
+IEND_TRAILER = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", 0xAE426082)
+ALLOWED_COLOR_TYPES = (2, 6)  # RGB, RGBA
+EXPECTED_BIT_DEPTH = 8
+
+
 def png_dimensions(data):
     """Read width and height from the PNG IHDR chunk."""
     if len(data) < 33 or data[:8] != PNG_MAGIC or data[12:16] != b"IHDR":
@@ -41,11 +48,23 @@ def png_dimensions(data):
     return width, height
 
 
+def png_ihdr_color(data):
+    """Read (bit depth, color type) from the PNG IHDR chunk.
+
+    IHDR layout: width (4), height (4), bit depth (1), color type (1),
+    so bit depth is byte 24 and color type is byte 25 of the file.
+    """
+    if len(data) < 33 or data[:8] != PNG_MAGIC or data[12:16] != b"IHDR":
+        return None
+    return data[24], data[25]
+
+
 OUT.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(SRC, DST)
 
-# Verify the copy: PNG magic bytes, 1024x1024 dimensions, size, and
-# SHA-256 must all match the source.
+# Verify the copy: PNG magic bytes, 1024x1024 dimensions, IHDR color
+# type 2 (RGB) or 6 (RGBA) with bit depth 8, a valid IEND trailer,
+# size, and SHA-256 must all match the source.
 src_bytes = SRC.read_bytes()
 dst_bytes = DST.read_bytes()
 if not dst_bytes.startswith(PNG_MAGIC):
@@ -56,6 +75,17 @@ if dims != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
     print(f"error: output dimensions {dims} != "
           f"({EXPECTED_WIDTH}, {EXPECTED_HEIGHT})", file=sys.stderr)
     sys.exit(1)
+color = png_ihdr_color(dst_bytes)
+if color is None or color[1] not in ALLOWED_COLOR_TYPES \
+        or color[0] != EXPECTED_BIT_DEPTH:
+    print(f"error: output IHDR bit depth/color type {color} != "
+          f"({EXPECTED_BIT_DEPTH}, one of {ALLOWED_COLOR_TYPES})",
+          file=sys.stderr)
+    sys.exit(1)
+if not dst_bytes.endswith(IEND_TRAILER):
+    print("error: output does not end with a valid IEND chunk",
+          file=sys.stderr)
+    sys.exit(1)
 if len(dst_bytes) != len(src_bytes):
     print(f"error: output size {len(dst_bytes)} != source size {len(src_bytes)}",
           file=sys.stderr)
@@ -64,4 +94,5 @@ if hashlib.sha256(dst_bytes).hexdigest() != hashlib.sha256(src_bytes).hexdigest(
     print("error: output SHA-256 does not match the source", file=sys.stderr)
     sys.exit(1)
 print("wrote", DST,
-      f"({len(dst_bytes)} bytes, 1024x1024, sha256 verified)")
+      f"({len(dst_bytes)} bytes, 1024x1024, color type {color[1]}, "
+      f"bit depth {color[0]}, IEND verified, sha256 verified)")
